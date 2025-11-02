@@ -756,7 +756,7 @@ class _ActDetailScreenState extends State<ActDetailScreen>
 
   // Остальные методы остаются без изменений...
   // _buildInfoTab(), _buildHistoryTab(), _buildInfoRow(), _getCategoryIcon()
-
+  
   Widget _buildInfoTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),

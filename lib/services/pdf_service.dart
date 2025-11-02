@@ -1,16 +1,46 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:printing/printing.dart';
+// Для веба
+import 'dart:html' as html;
 
 class PdfService {
   static final PdfService _instance = PdfService._internal();
   factory PdfService() => _instance;
   PdfService._internal();
 
-  // 📄 Создание PDF документа с водяным знаком и защитой
+  // Кэш для шрифтов
+  pw.Font? _regularFont;
+  pw.Font? _boldFont;
+
+  // 🔤 Загрузка локальных шрифтов из assets
+  Future<void> _loadFonts() async {
+    if (_regularFont != null && _boldFont != null) return;
+
+    try {
+      print('🔄 Loading fonts from assets...');
+
+      final regularData = await rootBundle.load(
+        'assets/fonts/Roboto-Regular.ttf',
+      );
+      final boldData = await rootBundle.load('assets/fonts/Roboto-Bold.ttf');
+
+      _regularFont = pw.Font.ttf(regularData);
+      _boldFont = pw.Font.ttf(boldData);
+
+      print('✅ Fonts loaded successfully!');
+    } catch (e) {
+      print('❌ Error loading fonts: $e');
+      rethrow;
+    }
+  }
+
+  // 📄 Создание PDF документа как изображения (защита от копирования)
   Future<void> generateProtectedPdf({
     required String title,
     required String content,
@@ -20,213 +50,184 @@ class PdfService {
     required String category,
   }) async {
     try {
-      final pdf = pw.Document(
-        title: title,
-        subject: 'Нормативный акт РК',
-        author: 'AdiletZan.kz',
-        creator: 'AdiletZan.kz Official App',
-      );
+      await _loadFonts();
 
-      // Создаем водяной знак
-      final watermarkText = _createWatermarkWidget();
+      // Сначала создаём временный PDF с текстом
+      final tempPdf = pw.Document();
 
-      // Добавляем страницы
-      pdf.addPage(
+      tempPdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
+          theme: pw.ThemeData.withFont(base: _regularFont!, bold: _boldFont!),
           build: (pw.Context context) => [
-            // Титульная страница
             _buildTitlePage(
               title: title,
               subtitle: subtitle,
               actNumber: actNumber,
               date: date,
               category: category,
-              watermark: watermarkText,
             ),
-            // Содержание
-            ..._buildContentPages(content, watermarkText),
+            ..._buildContentPages(content),
           ],
         ),
       );
 
-      // Сохраняем и открываем файл
-      await _saveAndSharePdf(pdf, title);
+      // Конвертируем PDF в изображения
+      final tempPdfBytes = await tempPdf.save();
 
+      // Используем Printing для рендеринга страниц в изображения
+      final images = Printing.raster(
+        tempPdfBytes,
+        dpi: 150, // Качество изображения
+      );
+
+      // Создаём финальный PDF из изображений
+      final finalPdf = pw.Document();
+
+      await for (final page in images) {
+        final imageBytes = await page.toPng(); // Правильный метод
+        final image = pw.MemoryImage(imageBytes);
+
+        finalPdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            build: (pw.Context context) {
+              return pw.Center(child: pw.Image(image, fit: pw.BoxFit.contain));
+            },
+          ),
+        );
+      }
+
+      // Сохраняем финальный PDF
+      await _saveAndSharePdf(finalPdf, title);
     } catch (e) {
       print('Error generating PDF: $e');
       rethrow;
     }
   }
 
-  // 🎨 Создание виджета водяного знака
-  pw.Widget _createWatermarkWidget() {
-    return pw.Stack(
-      children: [
-        pw.Transform.rotate(
-          angle: -0.5,
-          child: pw.Opacity(
-            opacity: 0.03,
-            child: pw.Text(
-              'AdiletZan.kz\nОфициальная копия',
-              style: pw.TextStyle(
-                fontSize: 60,
-                color: PdfColors.blue800,
-                fontWeight: pw.FontWeight.bold,
-              ),
-              textAlign: pw.TextAlign.center,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // 📄 Титульная страница
+  // 📄 Титульная страница (БЕЗ ВОДЯНОГО ЗНАКА)
   pw.Widget _buildTitlePage({
     required String title,
     required String subtitle,
     required String actNumber,
     required String date,
     required String category,
-    required pw.Widget watermark,
   }) {
-    return pw.Stack(
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.center,
+      mainAxisAlignment: pw.MainAxisAlignment.center,
       children: [
-        // Водяной знак на заднем плане
-        watermark,
-
-        // Основной контент
-        pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.center,
-          mainAxisAlignment: pw.MainAxisAlignment.center,
-          children: [
-            // Гербовая символика
-            pw.Container(
-              width: 80,
-              height: 80,
-              decoration: pw.BoxDecoration(
-                shape: pw.BoxShape.circle,
-                color: PdfColors.blue50,
-              ),
-              child: pw.Center(
-                child: pw.Text(
-                  'ҚАЗ',
-                  style: pw.TextStyle(
-                    fontSize: 16,
-                    fontWeight: pw.FontWeight.bold,
-                    color: PdfColors.blue700,
-                  ),
-                ),
-              ),
-            ),
-
-            pw.SizedBox(height: 30),
-
-            // Категория
-            pw.Container(
-              padding: const pw.EdgeInsets.all(8),
-              decoration: pw.BoxDecoration(
-                color: PdfColors.blue50,
-                borderRadius: pw.BorderRadius.circular(4),
-              ),
-              child: pw.Text(
-                category.toUpperCase(),
-                style: pw.TextStyle(
-                  fontSize: 12,
-                  color: PdfColors.blue700,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-
-            pw.SizedBox(height: 20),
-
-            // Заголовок
-            pw.Text(
-              title,
+        // Гербовая символика
+        pw.Container(
+          width: 80,
+          height: 80,
+          decoration: pw.BoxDecoration(
+            shape: pw.BoxShape.circle,
+            color: PdfColors.blue50,
+          ),
+          child: pw.Center(
+            child: pw.Text(
+              'ҚАЗ',
               style: pw.TextStyle(
-                fontSize: 22,
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColors.blue900,
-              ),
-              textAlign: pw.TextAlign.center,
-            ),
-
-            pw.SizedBox(height: 15),
-
-            // Подзаголовок
-            if (subtitle.isNotEmpty)
-              pw.Text(
-                subtitle,
-                style: const pw.TextStyle(
-                  fontSize: 14,
-                  color: PdfColors.grey600,
-                ),
-                textAlign: pw.TextAlign.center,
-              ),
-
-            pw.SizedBox(height: 25),
-
-            // Информация о документе
-            pw.Container(
-              width: double.infinity,
-              padding: const pw.EdgeInsets.all(20),
-              decoration: pw.BoxDecoration(
-                color: PdfColors.grey50,
-                borderRadius: pw.BorderRadius.circular(8),
-                border: pw.Border.all(
-                  color: PdfColors.grey300,
-                  width: 1,
-                ),
-              ),
-              child: pw.Column(
-                children: [
-                  _buildInfoRow('Номер документа:', actNumber),
-                  _buildInfoRow('Дата принятия:', date),
-                  _buildInfoRow('Статус:', 'Действующий'),
-                  _buildInfoRow('Источник:', 'AdiletZan.kz'),
-                  _buildInfoRow('Дата генерации:',
-                      '${DateTime.now().day}.${DateTime.now().month}.${DateTime.now().year}'),
-                ],
+                fontSize: 16,
+                font: _boldFont,
+                color: PdfColors.blue700,
               ),
             ),
+          ),
+        ),
 
-            pw.SizedBox(height: 30),
+        pw.SizedBox(height: 30),
 
-            // Предупреждение о защите
-            pw.Container(
-              padding: const pw.EdgeInsets.all(12),
-              decoration: pw.BoxDecoration(
-                color: PdfColors.red50,
-                borderRadius: pw.BorderRadius.circular(6),
-                border: pw.Border.all(
-                  color: PdfColors.red200,
-                  width: 1,
-                ),
-              ),
-              child: pw.Row(
-                children: [
-                  pw.Icon(
-                    pw.IconData(0xe16d), // Замок иконка
-                    size: 16,
-                    color: PdfColors.red600,
-                  ),
-                  pw.SizedBox(width: 8),
-                  pw.Expanded(
-                    child: pw.Text(
-                      'ОФИЦИАЛЬНАЯ КОПИЯ. КОПИРОВАНИЕ И РАСПРОСТРАНЕНИЕ ЗАПРЕЩЕНО.',
-                      style: pw.TextStyle(
-                        fontSize: 10,
-                        color: PdfColors.red600,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+        // Категория
+        pw.Container(
+          padding: const pw.EdgeInsets.all(8),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.blue50,
+            borderRadius: pw.BorderRadius.circular(4),
+          ),
+          child: pw.Text(
+            category.toUpperCase(),
+            style: pw.TextStyle(
+              fontSize: 12,
+              color: PdfColors.blue700,
+              font: _boldFont,
             ),
-          ],
+          ),
+        ),
+
+        pw.SizedBox(height: 20),
+
+        // Заголовок
+        pw.Text(
+          title,
+          style: pw.TextStyle(
+            fontSize: 22,
+            font: _boldFont,
+            color: PdfColors.blue900,
+          ),
+          textAlign: pw.TextAlign.center,
+        ),
+
+        pw.SizedBox(height: 15),
+
+        // Подзаголовок
+        if (subtitle.isNotEmpty)
+          pw.Text(
+            subtitle,
+            style: pw.TextStyle(
+              fontSize: 14,
+              color: PdfColors.grey600,
+              font: _regularFont,
+            ),
+            textAlign: pw.TextAlign.center,
+          ),
+
+        pw.SizedBox(height: 25),
+
+        // Информация о документе
+        pw.Container(
+          width: double.infinity,
+          padding: const pw.EdgeInsets.all(20),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.grey50,
+            borderRadius: pw.BorderRadius.circular(8),
+            border: pw.Border.all(color: PdfColors.grey300, width: 1),
+          ),
+          child: pw.Column(
+            children: [
+              _buildInfoRow('Номер документа:', actNumber),
+              _buildInfoRow('Дата принятия:', date),
+              _buildInfoRow('Статус:', 'Действующий'),
+              _buildInfoRow('Источник:', 'AdiletZan.kz'),
+              _buildInfoRow(
+                'Дата генерации:',
+                '${DateTime.now().day}.${DateTime.now().month}.${DateTime.now().year}',
+              ),
+            ],
+          ),
+        ),
+
+        pw.SizedBox(height: 30),
+
+        // Предупреждение о защите
+        pw.Container(
+          padding: const pw.EdgeInsets.all(12),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.red50,
+            borderRadius: pw.BorderRadius.circular(6),
+            border: pw.Border.all(color: PdfColors.red200, width: 1),
+          ),
+          child: pw.Text(
+            'ОФИЦИАЛЬНАЯ КОПИЯ. КОПИРОВАНИЕ И РАСПРОСТРАНЕНИЕ ЗАПРЕЩЕНО.',
+            style: pw.TextStyle(
+              fontSize: 10,
+              color: PdfColors.red600,
+              font: _boldFont,
+            ),
+            textAlign: pw.TextAlign.center,
+          ),
         ),
       ],
     );
@@ -246,7 +247,7 @@ class PdfService {
               style: pw.TextStyle(
                 fontSize: 11,
                 color: PdfColors.grey600,
-                fontWeight: pw.FontWeight.bold,
+                font: _boldFont,
               ),
             ),
           ),
@@ -254,9 +255,10 @@ class PdfService {
             flex: 3,
             child: pw.Text(
               value,
-              style: const pw.TextStyle(
+              style: pw.TextStyle(
                 fontSize: 11,
                 color: PdfColors.grey800,
+                font: _regularFont,
               ),
             ),
           ),
@@ -266,19 +268,16 @@ class PdfService {
   }
 
   // 📄 Страницы с содержанием
-  List<pw.Widget> _buildContentPages(String content, pw.Widget watermark) {
+  List<pw.Widget> _buildContentPages(String content) {
     final lines = content.split('\n');
-    final contentPages = <pw.Widget>[];
     final currentPageContent = <pw.Widget>[];
 
-    // Добавляем водяной знак на каждую страницу
     for (final line in lines) {
       if (line.trim().isEmpty) {
         currentPageContent.add(pw.SizedBox(height: 12));
       } else if (line.trim().startsWith('РАЗДЕЛ') ||
           line.trim().startsWith('Глава') ||
           line.trim().startsWith('Статья')) {
-        // Заголовки разделов
         currentPageContent.add(
           pw.Container(
             margin: const pw.EdgeInsets.only(bottom: 15, top: 10),
@@ -286,14 +285,13 @@ class PdfService {
               line.trim(),
               style: pw.TextStyle(
                 fontSize: 14,
-                fontWeight: pw.FontWeight.bold,
+                font: _boldFont,
                 color: PdfColors.blue800,
               ),
             ),
           ),
         );
       } else if (line.trim().startsWith(RegExp(r'^[0-9]+\..*'))) {
-        // Нумерованные пункты
         currentPageContent.add(
           pw.Padding(
             padding: const pw.EdgeInsets.only(bottom: 8, left: 16),
@@ -302,14 +300,15 @@ class PdfService {
               children: [
                 pw.Text(
                   '• ',
-                  style: const pw.TextStyle(fontSize: 12),
+                  style: pw.TextStyle(fontSize: 12, font: _regularFont),
                 ),
                 pw.Expanded(
                   child: pw.Text(
                     line.trim(),
-                    style: const pw.TextStyle(
+                    style: pw.TextStyle(
                       fontSize: 12,
                       height: 1.5,
+                      font: _regularFont,
                     ),
                     textAlign: pw.TextAlign.justify,
                   ),
@@ -319,15 +318,15 @@ class PdfService {
           ),
         );
       } else {
-        // Обычный текст
         currentPageContent.add(
           pw.Padding(
             padding: const pw.EdgeInsets.only(bottom: 8),
             child: pw.Text(
               line.trim(),
-              style: const pw.TextStyle(
+              style: pw.TextStyle(
                 fontSize: 12,
                 height: 1.5,
+                font: _regularFont,
               ),
               textAlign: pw.TextAlign.justify,
             ),
@@ -336,41 +335,40 @@ class PdfService {
       }
     }
 
-    contentPages.add(
-      pw.Stack(
-        children: [
-          watermark,
-          pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: currentPageContent,
-          ),
-        ],
-      ),
-    );
-
-    return contentPages;
+    return currentPageContent;
   }
 
   // 💾 Сохранение и открытие PDF
   Future<void> _saveAndSharePdf(pw.Document pdf, String title) async {
     try {
-      // Получаем директорию для временных файлов
-      final directory = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = '${_sanitizeFileName(title)}_$timestamp.pdf';
-      final filePath = '${directory.path}/$fileName';
+      final pdfBytes = await pdf.save();
 
-      // Сохраняем PDF файл
-      final file = File(filePath);
-      await file.writeAsBytes(await pdf.save());
+      if (kIsWeb) {
+        // ДЛЯ ВЕБА
+        final blob = html.Blob([pdfBytes], 'application/pdf');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        html.AnchorElement(href: url)
+          ..setAttribute('download', '${_sanitizeFileName(title)}.pdf')
+          ..click();
+        html.Url.revokeObjectUrl(url);
 
-      // Делимся файлом
-      await Share.shareXFiles(
-        [XFile(filePath)],
-        subject: 'Нормативный акт: $title',
-        text: 'Официальная копия нормативного акта из AdiletZan.kz',
-      );
+        print('✅ PDF downloaded successfully on web');
+      } else {
+        // ДЛЯ МОБИЛЬНЫХ
+        final directory = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final fileName = '${_sanitizeFileName(title)}_$timestamp.pdf';
+        final filePath = '${directory.path}/$fileName';
 
+        final file = File(filePath);
+        await file.writeAsBytes(pdfBytes);
+
+        await Share.shareXFiles(
+          [XFile(filePath)],
+          subject: 'Нормативный акт: $title',
+          text: 'Официальная копия нормативного акта из AdiletZan.kz',
+        );
+      }
     } catch (e) {
       print('Error saving/sharing PDF: $e');
       rethrow;
